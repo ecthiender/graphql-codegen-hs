@@ -70,7 +70,11 @@ mapToTSInterface obj = TSInterface (getName obj) tsFields
     tsFields = map (\(name, gtype) -> TSInterfaceField (GQL.unName name) (getTypeName gtype)) fields
     fields = map (\x -> (GQL._fldName x, GQL._fldType x)) $ GQL._otdFieldsDefinition obj
     getTypeName = \case
-      GQL.TypeNamed _ name -> TSTNamed $ GQL.unName name
+      GQL.TypeNamed _ name -> case GQL.unName name of
+        -- ID is GraphQL primitive, convert that to String. All other primitive
+        -- types map with the same name to TS primitives
+        "ID" -> TSTNamed "String"
+        _    -> TSTNamed $ GQL.unName name
       GQL.TypeList _ typ -> TSTList $ getTypeName typ
 
 serializeTSInterface :: TSInterface -> Text

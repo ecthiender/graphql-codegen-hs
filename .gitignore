@@ -1,0 +1,5 @@
+.stack-work/
+*~
+*.graphql
+*.gql
+*.ts

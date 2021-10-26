@@ -12,12 +12,15 @@ main = do
       putStrLn "ERROR: no file provided"
       usage
       Sys.exitFailure
-    (filepath:_) -> do
-      schema <- parseFile filepath
-      let code = generateCode schema
-      putStrLn code
+    (arg:_) -> do
+      case arg of
+        "--help" -> usage
+        filepath -> do
+          schema <- parseFile filepath
+          let code = generateCode schema
+          putStrLn code
 
 usage :: IO ()
 usage = do
-  putStrLn "Usage:"
-  putStrLn "  graphql-codegen <graphql-schema-filepath>"
+  putStrLn "Usage: graphql-codegen FILE"
+  putStrLn "Generate TypeScript types from GraphQL SDL files."

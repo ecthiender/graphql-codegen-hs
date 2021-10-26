@@ -3,7 +3,6 @@
 
 module Lib where
 
-import Data.List (intercalate)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -11,11 +10,16 @@ import qualified Language.GraphQL.Draft.Parser as GQL
 import qualified Language.GraphQL.Draft.Syntax as GQL
 import qualified System.Exit as Sys
 import Text.Pretty.Simple
+import Control.Arrow ((&&&))
+import Data.List (find)
 
 -- Source AST is GQL.SchemaDocument
 
--- | the concrete object type we are interested in
+-- | the concrete types we are interested in
 type ObjectTypeDef = GQL.ObjectTypeDefinition GQL.InputValueDefinition
+type InputTypeDef = GQL.InputObjectTypeDefinition GQL.InputValueDefinition
+
+data InterestingTypes = ITInput InputTypeDef | ITObject ObjectTypeDef
 
 -- | Target AST for TS interfaces
 data TSInterface
@@ -37,10 +41,33 @@ data TSType
 
 generateCode :: GQL.SchemaDocument -> String
 generateCode schema =
-  let allTypes = getAllObjectTypes schema (GQL.unsafeMkName "Query")
+  let allTypes = getInterestingTypes schema roots
+      roots = getRoots schema
       ts = map mapToTSInterface allTypes
       interfaces = T.stripEnd $ T.unlines $ map serializeTSInterface ts
   in T.unpack interfaces
+
+-- | Given a 'SchemaDocument', returns the name of the root query object. This
+-- function right now is a bit unwieldly. Is there a more obvious way to walk
+-- down the AST?
+getRoots :: GQL.SchemaDocument -> [GQL.Name]
+getRoots (GQL.SchemaDocument tydefs) =
+  case concatMap getRootName tydefs of
+    [] -> [GQL.unsafeMkName "Query"]
+    roots -> roots
+  where
+    getRootName = \case
+      GQL.TypeSystemDefinitionSchema sd ->
+        let rootOps = filter (\x -> GQL._rotdOperationType x `elem` rootOperations)
+                     $ GQL._sdRootOperationTypeDefinitions sd
+        in GQL._rotdOperationTypeType <$> rootOps
+      _ -> []
+
+rootOperations :: [GQL.OperationType]
+rootOperations = [ GQL.OperationTypeQuery
+                 , GQL.OperationTypeMutation
+                 , GQL.OperationTypeSubscription
+                 ]
 
 parseFile :: FilePath -> IO GQL.SchemaDocument
 parseFile filepath = do
@@ -52,23 +79,34 @@ parseFile filepath = do
       putStrLn $ "ERROR: Failed parsing GraphQL schema: " <> T.unpack e
       Sys.exitFailure
 
--- | get all object types ignoring the root object
-getAllObjectTypes :: GQL.SchemaDocument -> GQL.Name -> [ObjectTypeDef]
-getAllObjectTypes (GQL.SchemaDocument typeSysDefs) rootName =
-  filter ((/= rootName) . GQL._otdName) $ mapMaybe getObjectDef typeSysDefs
+-- | Get all object and input types from the schema. (ignoring the root object)
+getInterestingTypes :: GQL.SchemaDocument -> [GQL.Name] -> [InterestingTypes]
+getInterestingTypes (GQL.SchemaDocument typeSysDefs) rootNames =
+  mapMaybe getObjectDef typeSysDefs
   where
     getObjectDef = \case
       GQL.TypeSystemDefinitionSchema _ -> Nothing
       GQL.TypeSystemDefinitionType typeDef -> case typeDef of
-        GQL.TypeDefinitionObject objDef -> Just objDef
+        GQL.TypeDefinitionObject objDef ->
+          if GQL._otdName objDef `elem` rootNames
+          then Nothing
+          else Just $ ITObject objDef
+        GQL.TypeDefinitionInputObject inpDef -> Just $ ITInput inpDef
         _ -> Nothing
 
-mapToTSInterface :: ObjectTypeDef -> TSInterface
-mapToTSInterface obj = TSInterface (getName obj) tsFields
+mapToTSInterface :: InterestingTypes -> TSInterface
+mapToTSInterface obj =
+  let name = getName obj
+      fields = getFields obj
+      tsFields = map (\(name, gtype) -> TSInterfaceField (GQL.unName name) (getTypeName gtype)) fields
+  in TSInterface name tsFields
   where
-    getName = GQL.unName . GQL._otdName
-    tsFields = map (\(name, gtype) -> TSInterfaceField (GQL.unName name) (getTypeName gtype)) fields
-    fields = map (\x -> (GQL._fldName x, GQL._fldType x)) $ GQL._otdFieldsDefinition obj
+    getName = GQL.unName . \case
+      ITInput i ->  GQL._iotdName i
+      ITObject o -> GQL._otdName o
+    getFields = \case
+      ITInput i -> map (GQL._ivdName &&& GQL._ivdType) $ GQL._iotdValueDefinitions i
+      ITObject o -> map (GQL._fldName &&& GQL._fldType) $ GQL._otdFieldsDefinition o
     getTypeName = \case
       GQL.TypeNamed _ name -> case GQL.unName name of
         -- ID is GraphQL primitive, convert that to String. All other primitive
